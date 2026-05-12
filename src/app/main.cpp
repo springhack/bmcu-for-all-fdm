@@ -8,6 +8,27 @@
 #include "platform/debug_log.h"
 #include <string.h>
 
+static bool parse_channel_command(const char *line, const char *verb, uint8_t *channel_id)
+{
+    if ((line == nullptr) || (verb == nullptr) || (channel_id == nullptr))
+        return false;
+
+    const size_t verb_len = strlen(verb);
+    if (strncmp(line, verb, verb_len) != 0)
+        return false;
+
+    const char *p = line + verb_len;
+    if (*p != ' ')
+        return false;
+    ++p;
+
+    if ((p[0] < '0') || (p[0] > '3') || (p[1] != '\0'))
+        return false;
+
+    *channel_id = (uint8_t)(p[0] - '0');
+    return true;
+}
+
 WS2812_class SYS_RGB;
 WS2812_class RGBOUT[4];
 
@@ -183,7 +204,7 @@ int main(void)
     RGB_update();
     delay(50);
 
-    DEBUG_init();
+    Debug_log_init();
     ams_init();
     Flash_saves_init();
 
@@ -198,13 +219,32 @@ int main(void)
     SYS_RGB.set_RGB(0x00, 0x10, 0x00, 0);
     RGB_update();
 
-    DEBUG("START OFFLINE\n");
+    Debug_log_write("START OFFLINE\n");
 
     while (1)
     {
+        char line[32];
+        if (Debug_log_readline(line, (int)sizeof(line)))
+        {
+            uint8_t channel_id = 0u;
+            bool accepted = false;
+
+            if (parse_channel_command(line, "INPUT", &channel_id))
+                accepted = Motion_control_uart_input(channel_id);
+            else if (parse_channel_command(line, "OUTPUT", &channel_id))
+                accepted = Motion_control_uart_output(channel_id);
+
+            if (!accepted)
+                Debug_log_write("ERR\n");
+        }
+
         ams_datas_save_run();
         ams_state_save_run();
         Motion_control_run(0);
+
+        if (Motion_control_uart_take_done())
+            Debug_log_write("DONE\n");
+
         RGB_update();
     }
 }

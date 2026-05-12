@@ -327,6 +327,19 @@ static int8_t   standalone_manual_candidate[4] = {0,0,0,0};   // -1=feed, +1=ret
 static int8_t   standalone_manual_active[4]    = {0,0,0,0};   // -1=feed, +1=retract
 static uint64_t standalone_manual_t0_ms[4]     = {0ull,0ull,0ull,0ull};
 
+enum uart_command_mode : uint8_t
+{
+    UART_COMMAND_NONE   = 0u,
+    UART_COMMAND_INPUT  = 1u,
+    UART_COMMAND_OUTPUT = 2u,
+};
+
+static uint8_t  g_uart_command_mode = UART_COMMAND_NONE;
+static uint8_t  g_uart_command_ch   = 0xFFu;
+static uint8_t  g_uart_command_done = 0u;
+static uint64_t g_uart_command_t0_ms = 0ull;
+static constexpr uint64_t UART_COMMAND_MAX_MS = 60000ull;
+
 bool filament_channel_inserted[4]       = {false, false, false, false}; // czy kanał fizycznie wpięty
 
 static constexpr float MC_PULL_PIDP_PCT = buffer_constants::load_control::pidp_pct;
@@ -379,6 +392,19 @@ extern void RGB_update();
 static inline bool all_no_filament()
 {
     return ((MC_ONLINE_key_stu[0] | MC_ONLINE_key_stu[1] | MC_ONLINE_key_stu[2] | MC_ONLINE_key_stu[3]) == 0);
+}
+
+static inline bool uart_command_active_for(uint8_t ch)
+{
+    return (g_uart_command_mode != UART_COMMAND_NONE) && (g_uart_command_ch == ch);
+}
+
+static void uart_command_finish(void)
+{
+    g_uart_command_mode = UART_COMMAND_NONE;
+    g_uart_command_ch = 0xFFu;
+    g_uart_command_t0_ms = 0ull;
+    g_uart_command_done = 1u;
 }
 
 static void blink_all_blue_3s()
@@ -2505,6 +2531,12 @@ static void standalone_update(uint64_t now_ms)
 {
     for (uint8_t ch = 0; ch < kChCount; ch++)
     {
+        if (uart_command_active_for(ch))
+        {
+            standalone_reset_channel(ch);
+            continue;
+        }
+
         if (!filament_channel_inserted[ch] || !AS5600_is_good(ch))
         {
             standalone_reset_channel(ch);
@@ -2703,9 +2735,70 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
     {
         if (!AS5600_is_good(i))
         {
+            if (uart_command_active_for(i))
+                uart_command_finish();
+
             standalone_reset_channel(i);
             MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
             Motion_control_set_PWM(i, 0);
+            continue;
+        }
+
+        if (uart_command_active_for(i))
+        {
+            const uint64_t dt = time_now - g_uart_command_t0_ms;
+            const uint8_t ks = MC_ONLINE_key_stu[i];
+            const float pct = MC_PULL_pct_f[i];
+            bool done = false;
+            float x = 0.0f;
+
+            if (!filament_channel_inserted[i])
+            {
+                done = true;
+            }
+            else if (g_uart_command_mode == UART_COMMAND_INPUT)
+            {
+                if ((pct >= standalone_autoload_target_pct()) || (dt >= UART_COMMAND_MAX_MS))
+                    done = true;
+                else
+                    x = -MOTOR_CONTROL[i].dir * STANDALONE_AUTOLOAD_PWM_PUSH;
+            }
+            else if (g_uart_command_mode == UART_COMMAND_OUTPUT)
+            {
+                if ((ks != 1u) || (dt >= UART_COMMAND_MAX_MS))
+                    done = true;
+                else
+                    x = MOTOR_CONTROL[i].dir * STANDALONE_MANUAL_PWM_RETRACT;
+            }
+            else
+            {
+                done = true;
+            }
+
+            if (done)
+            {
+                standalone_reset_channel(i);
+                MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
+                Motion_control_set_PWM(i, 0);
+                uart_command_finish();
+                set_online_led_from_key_state(i, MC_ONLINE_key_stu[i], time_now);
+                continue;
+            }
+
+            standalone_reset_channel(i);
+            MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
+            MOTOR_CONTROL[i].PID_speed.clear();
+            MOTOR_CONTROL[i].PID_pressure.clear();
+            MOTOR_CONTROL[i].pwm_zeroed = (x == 0.0f) ? 1u : 0u;
+            _MOTOR_CONTROL::x_prev[i] = x;
+            Motion_control_set_PWM(i, (int)x);
+
+            if (g_uart_command_mode == UART_COMMAND_INPUT)
+                MC_STU_RGB_set_latch(i, UFB_LED_RGB_GREEN, time_now, 0u);
+            else
+                MC_STU_RGB_set_latch(i, UFB_LED_RGB_PURPLE, time_now, 1u);
+
+            set_online_led_from_key_state(i, MC_ONLINE_key_stu[i], time_now);
             continue;
         }
 
@@ -2913,6 +3006,39 @@ void Motion_control_run(int error)
         if ((MC_AS5600.online[i] == false) || (MC_AS5600.magnet_stu[i] == -1))
             MC_STU_RGB_set(i, 0xFF, 0x00, 0x00);
     }
+}
+
+bool Motion_control_uart_input(uint8_t channel_id)
+{
+    if ((channel_id >= kChCount) || (g_uart_command_mode != UART_COMMAND_NONE))
+        return false;
+
+    standalone_reset_channel(channel_id);
+    g_uart_command_mode = UART_COMMAND_INPUT;
+    g_uart_command_ch = channel_id;
+    g_uart_command_t0_ms = time_ms_fast();
+    return true;
+}
+
+bool Motion_control_uart_output(uint8_t channel_id)
+{
+    if ((channel_id >= kChCount) || (g_uart_command_mode != UART_COMMAND_NONE))
+        return false;
+
+    standalone_reset_channel(channel_id);
+    g_uart_command_mode = UART_COMMAND_OUTPUT;
+    g_uart_command_ch = channel_id;
+    g_uart_command_t0_ms = time_ms_fast();
+    return true;
+}
+
+bool Motion_control_uart_take_done(void)
+{
+    if (g_uart_command_done == 0u)
+        return false;
+
+    g_uart_command_done = 0u;
+    return true;
 }
 
 // ===== PWM init =====

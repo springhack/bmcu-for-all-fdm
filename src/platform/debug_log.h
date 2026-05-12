@@ -20,6 +20,7 @@ uint64_t Debug_log_count64(void);
 void Debug_log_time(void);
 void Debug_log_write(const void *data);
 void Debug_log_write_num(const void *data, int num);
+bool Debug_log_readline(char *out, int out_size);
 
 #define DEBUG_time_log()
 

@@ -1,6 +1,7 @@
 #include "platform/debug_log.h"
 #include <string.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #include "ch32v20x_rcc.h"
 #include "ch32v20x_gpio.h"
@@ -9,12 +10,38 @@
 #include "ch32v20x_misc.h"
 
 /* ===== IRQ ===== */
-void USART3_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
-void USART3_IRQHandler(void)
+extern "C" void USART3_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
+static volatile uint8_t g_rx_len = 0u;
+static volatile uint8_t g_rx_ready = 0u;
+static char g_rx_line[32];
+
+extern "C" void USART3_IRQHandler(void)
 {
     if (USART_GetITStatus(USART3, USART_IT_RXNE) != RESET)
     {
-        (void)USART_ReceiveData(USART3);
+        const uint8_t ch = (uint8_t)(USART_ReceiveData(USART3) & 0xFFu);
+
+        if (g_rx_ready != 0u)
+            return;
+
+        if ((ch == '\r') || (ch == '\n'))
+        {
+            if (g_rx_len != 0u)
+            {
+                g_rx_line[g_rx_len] = '\0';
+                g_rx_ready = 1u;
+            }
+            return;
+        }
+
+        if (g_rx_len < (uint8_t)(sizeof(g_rx_line) - 1u))
+        {
+            g_rx_line[g_rx_len++] = (char)ch;
+        }
+        else
+        {
+            g_rx_len = 0u;
+        }
     }
 }
 
@@ -43,9 +70,9 @@ static void Debug_uart3_dma_init(uint32_t baudrate)
     GPIO_Init(GPIOB, &gpio);
 
     us.USART_BaudRate            = baudrate;
-    us.USART_WordLength          = USART_WordLength_9b;
+    us.USART_WordLength          = USART_WordLength_8b;
     us.USART_StopBits            = USART_StopBits_1;
-    us.USART_Parity              = USART_Parity_Even;
+    us.USART_Parity              = USART_Parity_No;
     us.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
     us.USART_Mode                = USART_Mode_Tx | USART_Mode_Rx;
     USART_Init(USART3, &us);
@@ -116,6 +143,26 @@ void Debug_log_write_num(const void *data, int num)
 
     /* wait DMA/UART complete */
     while (USART_GetFlagStatus(USART3, USART_FLAG_TC) == RESET) { }
+}
+
+bool Debug_log_readline(char *out, int out_size)
+{
+    if ((out == NULL) || (out_size <= 1)) return false;
+    if (g_rx_ready == 0u) return false;
+
+    __disable_irq();
+    const uint8_t n = g_rx_len;
+    int copy_n = (int)n;
+    if (copy_n > (out_size - 1)) copy_n = out_size - 1;
+
+    for (int i = 0; i < copy_n; i++)
+        out[i] = g_rx_line[i];
+
+    out[copy_n] = '\0';
+    g_rx_len = 0u;
+    g_rx_ready = 0u;
+    __enable_irq();
+    return true;
 }
 
 __attribute__((used))

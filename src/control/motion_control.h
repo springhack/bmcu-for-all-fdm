@@ -6,6 +6,9 @@ void Motion_control_init();
 void Motion_control_set_PWM(uint8_t CHx, int PWM);
 void Motion_control_run(int error);
 bool Motion_control_save_dm_key_none_thresholds(void);
+bool Motion_control_uart_input(uint8_t channel_id);
+bool Motion_control_uart_output(uint8_t channel_id);
+bool Motion_control_uart_take_done(void);
 
 void MC_PULL_detect_channels_inserted();
 

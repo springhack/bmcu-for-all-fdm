@@ -2,3 +2,4 @@
 .platformio/
 .DS_Store
 wchisp
+*.pyc

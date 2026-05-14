@@ -150,6 +150,18 @@ void WS2812_class::set_RGB(uint8_t R, uint8_t G, uint8_t B, uint8_t index)
     dirty = true;
 }
 
+bool WS2812_class::get_RGB(uint8_t index, uint8_t *R, uint8_t *G, uint8_t *B) const
+{
+    if ((index >= num) || (R == nullptr) || (G == nullptr) || (B == nullptr))
+        return false;
+
+    const uint32_t packed = last_grb[index];
+    *G = (uint8_t)((packed >> 16) & 0xFFu);
+    *R = (uint8_t)((packed >> 8) & 0xFFu);
+    *B = (uint8_t)(packed & 0xFFu);
+    return true;
+}
+
 void WS2812_class::set_RGB_online(uint8_t R, uint8_t G, uint8_t B, uint8_t index, bool filament)
 {
     if (index >= num) return;

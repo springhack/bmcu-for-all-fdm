@@ -9,6 +9,8 @@ bool Motion_control_save_dm_key_none_thresholds(void);
 bool Motion_control_uart_input(uint8_t channel_id);
 bool Motion_control_uart_output(uint8_t channel_id);
 bool Motion_control_uart_take_done(void);
+const char *Motion_control_buffer_mode_name(uint8_t channel_id);
+uint8_t Motion_control_key_state(uint8_t channel_id);
 
 void MC_PULL_detect_channels_inserted();
 

@@ -3041,6 +3041,28 @@ bool Motion_control_uart_take_done(void)
     return true;
 }
 
+const char *Motion_control_buffer_mode_name(uint8_t channel_id)
+{
+    if (channel_id >= kChCount)
+        return "IDLE";
+
+    if (MC_PULL_stu[channel_id] < 0)
+        return "PUSH";
+
+    if (MC_PULL_stu[channel_id] > 0)
+        return "PULL";
+
+    return "IDLE";
+}
+
+uint8_t Motion_control_key_state(uint8_t channel_id)
+{
+    if (channel_id >= kChCount)
+        return 0u;
+
+    return MC_ONLINE_key_stu[channel_id];
+}
+
 // ===== PWM init =====
 void MC_PWM_init()
 {

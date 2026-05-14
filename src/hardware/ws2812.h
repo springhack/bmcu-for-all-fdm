@@ -18,6 +18,7 @@ public:
     void updata(void);
 
     void set_RGB(uint8_t R, uint8_t G, uint8_t B, uint8_t index);
+    bool get_RGB(uint8_t index, uint8_t *R, uint8_t *G, uint8_t *B) const;
 
     void set_RGB_online(uint8_t R, uint8_t G, uint8_t B, uint8_t index, bool filament = false);
 

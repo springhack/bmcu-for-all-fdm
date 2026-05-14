@@ -6,6 +6,7 @@
 #include "model/filament_state.h"
 #include "hardware/adc_dma.h"
 #include "platform/debug_log.h"
+#include <stdio.h>
 #include <string.h>
 
 static bool parse_channel_command(const char *line, const char *verb, uint8_t *channel_id)
@@ -69,6 +70,61 @@ void RGB_update()
 static uint8_t g_fil_dirty = 0;
 static uint8_t g_loaded_ch = 0xFF;
 static uint8_t g_state_dirty = 0;
+
+static void write_runtime_state()
+{
+    char out[384];
+    int n = 0;
+
+    n += snprintf(out + n, sizeof(out) - (size_t)n, "STATE {\"loaded\":%d,\"channels\":[", (g_loaded_ch < 4u) ? (int)g_loaded_ch : -1);
+
+    for (uint8_t ch = 0; ch < 4u && n > 0 && (size_t)n < sizeof(out); ch++)
+    {
+        uint8_t sr = 0u, sg = 0u, sb = 0u;
+        uint8_t or_ = 0u, og = 0u, ob = 0u;
+        const uint8_t ks = Motion_control_key_state(ch);
+        const uint8_t sw1 = ((ks == 1u) || (ks == 2u)) ? 1u : 0u;
+        const uint8_t sw2 = ((ks == 1u) || (ks == 3u)) ? 1u : 0u;
+        (void)RGBOUT[ch].get_RGB(0u, &sr, &sg, &sb);
+        (void)RGBOUT[ch].get_RGB(1u, &or_, &og, &ob);
+
+        n += snprintf(out + n, sizeof(out) - (size_t)n,
+                      "%s{\"inserted\":%u,\"buffer\":\"%s\",\"sw1\":%u,\"sw2\":%u,\"status\":\"#%02X%02X%02X\",\"online\":\"#%02X%02X%02X\"}",
+                      (ch == 0u) ? "" : ",",
+                      filament_channel_inserted[ch] ? 1u : 0u,
+                      Motion_control_buffer_mode_name(ch),
+                      (unsigned)sw1,
+                      (unsigned)sw2,
+                      (unsigned)sr, (unsigned)sg, (unsigned)sb,
+                      (unsigned)or_, (unsigned)og, (unsigned)ob);
+    }
+
+    if (n < 0) return;
+    if ((size_t)n < sizeof(out))
+        n += snprintf(out + n, sizeof(out) - (size_t)n, "]}\n");
+
+    if (n > 0)
+    {
+        if ((size_t)n > sizeof(out)) n = (int)sizeof(out);
+        Debug_log_write_num(out, n);
+    }
+}
+
+static void state_report_run()
+{
+    static uint32_t last_ticks = 0u;
+
+    uint32_t tpm = time_hw_tpms;
+    if (!tpm) tpm = 1u;
+
+    const uint32_t now = time_ticks32();
+    const uint32_t interval = 500u * tpm;
+    if (last_ticks != 0u && (uint32_t)(now - last_ticks) < interval)
+        return;
+
+    last_ticks = now;
+    write_runtime_state();
+}
 
 static inline void ram_to_flashinfo(uint8_t fil, Flash_FilamentInfo* o)
 {
@@ -229,7 +285,12 @@ int main(void)
             uint8_t channel_id = 0u;
             bool accepted = false;
 
-            if (parse_channel_command(line, "INPUT", &channel_id))
+            if (strcmp(line, "STATE") == 0)
+            {
+                write_runtime_state();
+                accepted = true;
+            }
+            else if (parse_channel_command(line, "INPUT", &channel_id))
                 accepted = Motion_control_uart_input(channel_id);
             else if (parse_channel_command(line, "OUTPUT", &channel_id))
                 accepted = Motion_control_uart_output(channel_id);
@@ -246,5 +307,6 @@ int main(void)
             Debug_log_write("DONE\n");
 
         RGB_update();
+        state_report_run();
     }
 }

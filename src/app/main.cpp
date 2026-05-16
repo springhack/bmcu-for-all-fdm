@@ -70,15 +70,23 @@ void RGB_update()
 static uint8_t g_fil_dirty = 0;
 static uint8_t g_loaded_ch = 0xFF;
 static uint8_t g_state_dirty = 0;
-static char g_runtime_state_cache[768];
+static char g_runtime_state_cache[80];
 static int g_runtime_state_cache_len = 0;
+
+static uint8_t runtime_buffer_mode_code(uint8_t ch)
+{
+    const char *mode = Motion_control_buffer_mode_name(ch);
+    if (strcmp(mode, "PUSH") == 0) return 1u;
+    if (strcmp(mode, "PULL") == 0) return 2u;
+    return 0u;
+}
 
 static void update_runtime_state_cache()
 {
     int n = snprintf(g_runtime_state_cache,
                      sizeof(g_runtime_state_cache),
-                     "STATE {\"loaded\":%d,\"channels\":[",
-                     (g_loaded_ch < 4u) ? (int)g_loaded_ch : -1);
+                     "S %c",
+                     (g_loaded_ch < 4u) ? (char)('0' + g_loaded_ch) : 'F');
 
     if ((n < 0) || ((size_t)n >= sizeof(g_runtime_state_cache)))
         return;
@@ -90,17 +98,19 @@ static void update_runtime_state_cache()
         const uint8_t ks = Motion_control_key_state(ch);
         const uint8_t sw1 = ((ks == 1u) || (ks == 2u)) ? 1u : 0u;
         const uint8_t sw2 = ((ks == 1u) || (ks == 3u)) ? 1u : 0u;
+        const uint8_t flags =
+            (filament_channel_inserted[ch] ? 0x01u : 0x00u) |
+            (uint8_t)((runtime_buffer_mode_code(ch) & 0x03u) << 1) |
+            (sw1 ? 0x08u : 0x00u) |
+            (sw2 ? 0x10u : 0x00u);
+
         (void)RGBOUT[ch].get_RGB(0u, &sr, &sg, &sb);
         (void)RGBOUT[ch].get_RGB(1u, &or_, &og, &ob);
 
         const int wrote = snprintf(g_runtime_state_cache + n,
                                    sizeof(g_runtime_state_cache) - (size_t)n,
-                                   "%s{\"inserted\":%u,\"buffer\":\"%s\",\"sw1\":%u,\"sw2\":%u,\"status\":\"#%02X%02X%02X\",\"online\":\"#%02X%02X%02X\"}",
-                                   (ch == 0u) ? "" : ",",
-                                   filament_channel_inserted[ch] ? 1u : 0u,
-                                   Motion_control_buffer_mode_name(ch),
-                                   (unsigned)sw1,
-                                   (unsigned)sw2,
+                                   "%02X%02X%02X%02X%02X%02X%02X",
+                                   (unsigned)flags,
                                    (unsigned)sr, (unsigned)sg, (unsigned)sb,
                                    (unsigned)or_, (unsigned)og, (unsigned)ob);
 
@@ -111,7 +121,7 @@ static void update_runtime_state_cache()
 
     const int wrote = snprintf(g_runtime_state_cache + n,
                                sizeof(g_runtime_state_cache) - (size_t)n,
-                               "]}\n");
+                               "\n");
     if ((wrote < 0) || ((size_t)wrote >= (sizeof(g_runtime_state_cache) - (size_t)n)))
         return;
 

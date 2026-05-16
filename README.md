@@ -13,12 +13,60 @@
 - 自动进料一旦开始，会先完整执行完，再回到普通缓冲器逻辑。
 - 正常缓冲器补料和自动进料使用同样的前进速度。
 - 高阻力版只提高电机输出，不改变触发灵敏性和整体逻辑。
+- 运行状态由主控固件在内部更新时写入缓存，不主动持续上报。
+- ESP32-C3 Wi-Fi 桥接固件每 `500ms` 通过 UART 发送一次 `STATE`，收到状态后缓存起来，Web API 只返回 Wi-Fi 侧缓存。
 
 这版不做的事情：
 
 - 不和打印机通信
 - 不依赖 AMS 总线
 - 不暴露用户侧“手动长按进退料”模式
+
+## Wi-Fi 桥接固件
+
+`wifi/wifi.ino` 是 ESP32-C3 用的 Wi-Fi 桥接固件。它提供一个简单 Web 页面和 HTTP API，通过 UART 控制 UFB 主控。
+
+默认硬件连接：
+
+| ESP32-C3 | 用途 |
+|---|---|
+| `A3` | 接 UFB 主控 TX |
+| `A4` | 接 UFB 主控 RX |
+| `GPIO8` | 板载蓝色 LED，平时常亮，执行动作时闪烁 |
+| `3.3V/GND` | 由 UFB 供电 |
+
+USB 串口命令：
+
+```text
+WIFI ssid/password
+STATE
+INPUT 0
+OUTPUT 0
+```
+
+HTTP API：
+
+| 路径 | 方法 | 含义 |
+|---|---|---|
+| `/` | `GET` | Web 控制页面 |
+| `/api/state` | `GET` | 返回 Wi-Fi 侧缓存状态 |
+| `/api/action?cmd=input&ch=0` | `POST` | 指定通道进料 |
+| `/api/action?cmd=output&ch=0` | `POST` | 指定通道退料 |
+
+`/api/state` 返回紧凑文本，不返回 JSON：
+
+```text
+<busy> <stale> <compact-state>
+```
+
+`compact-state` 是 57 个十六进制字符：
+
+- 第 1 个字符：当前 loaded 通道，`0..3` 表示通道号，`F` 表示未 loaded
+- 后续每个通道 14 个字符，共 4 个通道
+- 每个通道包含 7 字节：`flags + status RGB + online RGB`
+- `flags`：bit0=`inserted`，bit1..2=`buffer mode`，bit3=`sw1`，bit4=`sw2`
+
+Wi-Fi 固件的 UART 接收缓冲、状态缓存和 API 响应都使用固定缓冲区，避免在 500ms 轮询路径上频繁动态分配。
 
 ## LED 状态
 
@@ -139,7 +187,7 @@ env PLATFORMIO_CORE_DIR=$PWD/.platformio pio run -e filament_buffer_bmcu_high_fo
 先确认设备处于 ISP 模式并能被识别：
 
 ```bash
-./wchisp probe
+./wchisp info
 ```
 
 刷标准版：
@@ -159,6 +207,12 @@ env PLATFORMIO_CORE_DIR=$PWD/.platformio pio run -e filament_buffer_bmcu_high_fo
 ```text
 Verify OK
 Device reset
+```
+
+刷 ESP32-C3 Wi-Fi 桥接固件：
+
+```bash
+arduino-cli compile --upload -p /dev/cu.usbmodem201201 --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc wifi
 ```
 
 ## 仓库结构

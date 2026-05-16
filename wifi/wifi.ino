@@ -4,6 +4,7 @@
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <string.h>
 
 namespace {
 
@@ -15,20 +16,26 @@ constexpr uint32_t kBmcuBaudRate = 115200;
 constexpr size_t kMaxLineLength = 512;
 constexpr uint32_t kWifiConnectTimeoutMs = 15000;
 constexpr uint32_t kActionLedBlinkMs = 250;
-constexpr uint32_t kStateRequestIntervalMs = 100;
+constexpr uint32_t kStateRequestIntervalMs = 500;
+constexpr size_t kCompactStateLength = 57;
+constexpr size_t kBmcuLineCapacity = 80;
+constexpr size_t kApiStateCapacity = 80;
 constexpr char kHostname[] = "bmcu";
 constexpr char kWifiNamespace[] = "wifi";
 constexpr char kWifiSsidKey[] = "ssid";
 constexpr char kWifiPassKey[] = "pass";
+constexpr char kDefaultCompactState[] = "F00000000000000000000000000000000000000000000000000000000";
+static_assert(sizeof(kDefaultCompactState) - 1 == kCompactStateLength);
 
 WebServer server(80);
 HardwareSerial bmcuSerial(1);
 Preferences preferences;
 String usbLineBuffer;
-String bmcuLineBuffer;
+char bmcuLineBuffer[kBmcuLineCapacity] = {};
+size_t bmcuLineLength = 0;
 String wifiSsid;
 String wifiPassword;
-String bmcuStateJson = "{\"loaded\":-1,\"channels\":[{\"inserted\":0,\"buffer\":\"IDLE\",\"sw1\":0,\"sw2\":0,\"status\":\"#000000\",\"online\":\"#000000\"},{\"inserted\":0,\"buffer\":\"IDLE\",\"sw1\":0,\"sw2\":0,\"status\":\"#000000\",\"online\":\"#000000\"},{\"inserted\":0,\"buffer\":\"IDLE\",\"sw1\":0,\"sw2\":0,\"status\":\"#000000\",\"online\":\"#000000\"},{\"inserted\":0,\"buffer\":\"IDLE\",\"sw1\":0,\"sw2\":0,\"status\":\"#000000\",\"online\":\"#000000\"}]}";
+char bmcuStateCompact[kCompactStateLength + 1] = "F00000000000000000000000000000000000000000000000000000000";
 bool bmcuBusy = false;
 bool serverStarted = false;
 bool mdnsStarted = false;
@@ -74,7 +81,18 @@ h1{margin:0;font-size:28px;font-weight:720}.sub{color:var(--muted);font-size:13p
 const grid=document.getElementById('grid'),statusEl=document.getElementById('status'),toast=document.getElementById('toast');
 let busy=false,loaded=-1;
 const names=['Channel 1','Channel 2','Channel 3','Channel 4'];
+const emptyCompact='F00000000000000000000000000000000000000000000000000000000';
 function showToast(t){toast.textContent=t;toast.classList.add('show');setTimeout(()=>toast.classList.remove('show'),1400)}
+function hx(s,o,n){return parseInt(s.slice(o,o+n),16)||0}
+function parseState(t){
+  const p=t.trim().split(/\s+/),c=(p[2]&&p[2].length>=57)?p[2]:emptyCompact;
+  const li=parseInt(c[0],16),channels=[];
+  for(let i=0,o=1;i<4;i++,o+=14){
+    const f=hx(c,o,2),m=(f>>1)&3;
+    channels.push({inserted:f&1,buffer:m===1?'PUSH':m===2?'PULL':'IDLE',sw1:(f>>3)&1,sw2:(f>>4)&1,status:'#'+c.slice(o+2,o+8),online:'#'+c.slice(o+8,o+14)});
+  }
+  return {busy:p[0]==='1',stale:p[1]!=='0',loaded:li<4?li:-1,channels};
+}
 function bufferMode(value){
   const text=(value||'IDLE').toString().toUpperCase();
   if(text==='PUSH')return {text:'PUSH',cls:'push'};
@@ -92,7 +110,7 @@ function card(i,c){
 async function refresh(){
   try{
     const r=await fetch('/api/state',{cache:'no-store'});
-    const s=await r.json();
+    const s=parseState(await r.text());
     busy=!!s.busy;loaded=s.loaded??-1;
     statusEl.textContent=s.stale?'WAIT':(busy?'BUSY':'IDLE');
     grid.innerHTML=(s.channels||[]).map((c,i)=>card(i,c)).join('');
@@ -191,17 +209,19 @@ void updateActionLed() {
   }
 }
 
-void consumeBmcuLine(String line) {
-  line.trim();
-  if (line.isEmpty()) return;
+void consumeBmcuLine(const char* line) {
+  if (line == nullptr || line[0] == '\0') return;
 
-  if (line == "DONE") {
+  if (strcmp(line, "DONE") == 0) {
     bmcuBusy = false;
     return;
   }
 
-  if (line.startsWith("STATE ")) {
-    bmcuStateJson = line.substring(6);
+  if (strncmp(line, "S ", 2) == 0) {
+    const char* compact = line + 2;
+    if (strlen(compact) < kCompactStateLength) return;
+    memcpy(bmcuStateCompact, compact, kCompactStateLength);
+    bmcuStateCompact[kCompactStateLength] = '\0';
     lastStateMs = millis();
   }
 }
@@ -211,14 +231,18 @@ void pollBmcuResponses() {
     const char ch = static_cast<char>(bmcuSerial.read());
     if (ch == '\r') continue;
     if (ch == '\n') {
-      if (!bmcuLineBuffer.isEmpty()) {
-        const String line = bmcuLineBuffer;
-        bmcuLineBuffer = "";
-        consumeBmcuLine(line);
+      if (bmcuLineLength > 0) {
+        bmcuLineBuffer[bmcuLineLength] = '\0';
+        consumeBmcuLine(bmcuLineBuffer);
+        bmcuLineLength = 0;
       }
       continue;
     }
-    if (bmcuLineBuffer.length() < kMaxLineLength) bmcuLineBuffer += ch;
+    if (bmcuLineLength < kBmcuLineCapacity - 1) {
+      bmcuLineBuffer[bmcuLineLength++] = ch;
+    } else {
+      bmcuLineLength = 0;
+    }
   }
 }
 
@@ -240,13 +264,14 @@ void handleIndex() {
 
 void handleApiState() {
   pollBmcuResponses();
-  String body = "{\"busy\":";
-  body += bmcuBusy ? "true" : "false";
-  body += ",\"stale\":";
-  body += (lastStateMs == 0 || millis() - lastStateMs > 3000) ? "true" : "false";
-  body += ",";
-  body += bmcuStateJson.substring(1);
-  server.send(200, "application/json; charset=utf-8", body);
+  char body[kApiStateCapacity] = {};
+  snprintf(body,
+           sizeof(body),
+           "%u %u %s",
+           bmcuBusy ? 1u : 0u,
+           (lastStateMs == 0 || millis() - lastStateMs > 3000) ? 1u : 0u,
+           bmcuStateCompact);
+  server.send(200, "text/plain; charset=utf-8", body);
 }
 
 void handleApiAction() {
@@ -390,7 +415,7 @@ void handleUsbCommand(const String& rawLine) {
 
   if (keyword == "STATE") {
     pollBmcuResponses();
-    Serial.println(bmcuStateJson);
+    Serial.println(bmcuStateCompact);
     return;
   }
 

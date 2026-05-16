@@ -1,5 +1,6 @@
 .pio/
 .platformio/
+.platformio-core/
 .DS_Store
 wchisp
 *.pyc

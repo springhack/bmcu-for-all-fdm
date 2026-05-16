@@ -70,15 +70,20 @@ void RGB_update()
 static uint8_t g_fil_dirty = 0;
 static uint8_t g_loaded_ch = 0xFF;
 static uint8_t g_state_dirty = 0;
+static char g_runtime_state_cache[768];
+static int g_runtime_state_cache_len = 0;
 
-static void write_runtime_state()
+static void update_runtime_state_cache()
 {
-    char out[384];
-    int n = 0;
+    int n = snprintf(g_runtime_state_cache,
+                     sizeof(g_runtime_state_cache),
+                     "STATE {\"loaded\":%d,\"channels\":[",
+                     (g_loaded_ch < 4u) ? (int)g_loaded_ch : -1);
 
-    n += snprintf(out + n, sizeof(out) - (size_t)n, "STATE {\"loaded\":%d,\"channels\":[", (g_loaded_ch < 4u) ? (int)g_loaded_ch : -1);
+    if ((n < 0) || ((size_t)n >= sizeof(g_runtime_state_cache)))
+        return;
 
-    for (uint8_t ch = 0; ch < 4u && n > 0 && (size_t)n < sizeof(out); ch++)
+    for (uint8_t ch = 0; ch < 4u; ch++)
     {
         uint8_t sr = 0u, sg = 0u, sb = 0u;
         uint8_t or_ = 0u, og = 0u, ob = 0u;
@@ -88,42 +93,38 @@ static void write_runtime_state()
         (void)RGBOUT[ch].get_RGB(0u, &sr, &sg, &sb);
         (void)RGBOUT[ch].get_RGB(1u, &or_, &og, &ob);
 
-        n += snprintf(out + n, sizeof(out) - (size_t)n,
-                      "%s{\"inserted\":%u,\"buffer\":\"%s\",\"sw1\":%u,\"sw2\":%u,\"status\":\"#%02X%02X%02X\",\"online\":\"#%02X%02X%02X\"}",
-                      (ch == 0u) ? "" : ",",
-                      filament_channel_inserted[ch] ? 1u : 0u,
-                      Motion_control_buffer_mode_name(ch),
-                      (unsigned)sw1,
-                      (unsigned)sw2,
-                      (unsigned)sr, (unsigned)sg, (unsigned)sb,
-                      (unsigned)or_, (unsigned)og, (unsigned)ob);
+        const int wrote = snprintf(g_runtime_state_cache + n,
+                                   sizeof(g_runtime_state_cache) - (size_t)n,
+                                   "%s{\"inserted\":%u,\"buffer\":\"%s\",\"sw1\":%u,\"sw2\":%u,\"status\":\"#%02X%02X%02X\",\"online\":\"#%02X%02X%02X\"}",
+                                   (ch == 0u) ? "" : ",",
+                                   filament_channel_inserted[ch] ? 1u : 0u,
+                                   Motion_control_buffer_mode_name(ch),
+                                   (unsigned)sw1,
+                                   (unsigned)sw2,
+                                   (unsigned)sr, (unsigned)sg, (unsigned)sb,
+                                   (unsigned)or_, (unsigned)og, (unsigned)ob);
+
+        if ((wrote < 0) || ((size_t)wrote >= (sizeof(g_runtime_state_cache) - (size_t)n)))
+            return;
+        n += wrote;
     }
 
-    if (n < 0) return;
-    if ((size_t)n < sizeof(out))
-        n += snprintf(out + n, sizeof(out) - (size_t)n, "]}\n");
-
-    if (n > 0)
-    {
-        if ((size_t)n > sizeof(out)) n = (int)sizeof(out);
-        Debug_log_write_num(out, n);
-    }
-}
-
-static void state_report_run()
-{
-    static uint32_t last_ticks = 0u;
-
-    uint32_t tpm = time_hw_tpms;
-    if (!tpm) tpm = 1u;
-
-    const uint32_t now = time_ticks32();
-    const uint32_t interval = 500u * tpm;
-    if (last_ticks != 0u && (uint32_t)(now - last_ticks) < interval)
+    const int wrote = snprintf(g_runtime_state_cache + n,
+                               sizeof(g_runtime_state_cache) - (size_t)n,
+                               "]}\n");
+    if ((wrote < 0) || ((size_t)wrote >= (sizeof(g_runtime_state_cache) - (size_t)n)))
         return;
 
-    last_ticks = now;
-    write_runtime_state();
+    g_runtime_state_cache_len = n + wrote;
+}
+
+static void write_runtime_state()
+{
+    if (g_runtime_state_cache_len <= 0)
+        update_runtime_state_cache();
+
+    if (g_runtime_state_cache_len > 0)
+        Debug_log_write_num(g_runtime_state_cache, g_runtime_state_cache_len);
 }
 
 static inline void ram_to_flashinfo(uint8_t fil, Flash_FilamentInfo* o)
@@ -307,6 +308,6 @@ int main(void)
             Debug_log_write("DONE\n");
 
         RGB_update();
-        state_report_run();
+        update_runtime_state_cache();
     }
 }

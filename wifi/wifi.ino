@@ -9,9 +9,13 @@ namespace {
 
 constexpr int kBmcuRxPin = A3;
 constexpr int kBmcuTxPin = A4;
+constexpr int kActionLedPin = 8;
+constexpr bool kActionLedActiveLow = true;
 constexpr uint32_t kBmcuBaudRate = 115200;
 constexpr size_t kMaxLineLength = 512;
 constexpr uint32_t kWifiConnectTimeoutMs = 15000;
+constexpr uint32_t kActionLedBlinkMs = 250;
+constexpr uint32_t kStateRequestIntervalMs = 100;
 constexpr char kHostname[] = "bmcu";
 constexpr char kWifiNamespace[] = "wifi";
 constexpr char kWifiSsidKey[] = "ssid";
@@ -29,6 +33,9 @@ bool bmcuBusy = false;
 bool serverStarted = false;
 bool mdnsStarted = false;
 uint32_t lastStateMs = 0;
+uint32_t lastActionLedToggleMs = 0;
+uint32_t lastStateRequestMs = 0;
+bool actionLedOn = true;
 
 const char kIndexHtml[] PROGMEM = R"HTML(
 <!doctype html>
@@ -159,11 +166,35 @@ void sendPlainText(const char* body) {
   server.send(200, "text/plain; charset=utf-8", body);
 }
 
+void writeActionLed(bool on) {
+  actionLedOn = on;
+  digitalWrite(kActionLedPin, (kActionLedActiveLow ? !on : on) ? HIGH : LOW);
+}
+
+void initActionLed() {
+  pinMode(kActionLedPin, OUTPUT);
+  writeActionLed(true);
+  lastActionLedToggleMs = millis();
+}
+
+void updateActionLed() {
+  const uint32_t nowMs = millis();
+  if (!bmcuBusy) {
+    if (!actionLedOn) writeActionLed(true);
+    lastActionLedToggleMs = nowMs;
+    return;
+  }
+
+  if (nowMs - lastActionLedToggleMs >= kActionLedBlinkMs) {
+    writeActionLed(!actionLedOn);
+    lastActionLedToggleMs = nowMs;
+  }
+}
+
 void consumeBmcuLine(String line) {
   line.trim();
   if (line.isEmpty()) return;
 
-  Serial.println(line);
   if (line == "DONE") {
     bmcuBusy = false;
     return;
@@ -194,6 +225,13 @@ void pollBmcuResponses() {
 void startBmcuAction(const String& command, uint8_t channelId) {
   bmcuSerial.printf("%s %u\n", command.c_str(), channelId);
   bmcuBusy = true;
+}
+
+void requestBmcuState() {
+  const uint32_t nowMs = millis();
+  if (nowMs - lastStateRequestMs < kStateRequestIntervalMs) return;
+  lastStateRequestMs = nowMs;
+  bmcuSerial.print("STATE\n");
 }
 
 void handleIndex() {
@@ -396,7 +434,12 @@ void pollUsbCommands() {
 
 void setup() {
   Serial.begin(115200);
-  delay(500);
+  const uint32_t serialWaitStartMs = millis();
+  while (!Serial && millis() - serialWaitStartMs < 3000) {
+    delay(10);
+  }
+  delay(100);
+  initActionLed();
 
   bmcuSerial.begin(kBmcuBaudRate, SERIAL_8N1, kBmcuRxPin, kBmcuTxPin);
   Serial.println("BMCU UART initialized");
@@ -407,6 +450,8 @@ void setup() {
 
 void loop() {
   pollUsbCommands();
+  requestBmcuState();
   pollBmcuResponses();
   if (serverStarted) server.handleClient();
+  updateActionLed();
 }
